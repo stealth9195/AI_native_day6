@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>일출·일몰 시간</title>
+<style>
+  :root { --bg:#fdf1e3; --card:#fff; --text:#2b2118; --muted:#7d6e60; --accent:#e0742a; --err:#b3261e; --line:#e6d2bc; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17120e; --card:#241c15; --text:#f1e7dc; --muted:#a89886; --accent:#ffa05c; --err:#ff8a80; --line:#4a3b2d; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--text);
+         font-family:system-ui,-apple-system,"Malgun Gothic",sans-serif; }
+  main { max-width:420px; margin:0 auto; display:grid; gap:16px; }
+  h1 { font-size:1.2rem; margin:0; }
+  form { display:flex; gap:8px; flex-wrap:wrap; }
+  input { padding:10px 12px; font-size:1rem; border:1px solid var(--line); border-radius:10px;
+          background:var(--card); color:var(--text); min-width:0; }
+  #city { flex:1; }
+  button { padding:10px 16px; font-size:1rem; border:0; border-radius:10px; background:var(--accent); color:#fff; cursor:pointer; }
+  .card { background:var(--card); border-radius:16px; padding:24px; box-shadow:0 2px 10px rgba(0,0,0,.08); }
+  .card h2 { font-size:1rem; margin:0 0 8px; }
+  .pair { display:grid; grid-template-columns:1fr 1fr; gap:12px; text-align:center; }
+  .pair .label { font-size:.9rem; color:var(--muted); }
+  .time { font-size:2.2rem; font-weight:700; margin:4px 0 0; }
+  .row { display:flex; justify-content:space-between; margin:8px 0; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  .error { color:var(--err); }
+  .api-box { font-size:.85rem; }
+  .api-box code { word-break:break-all; display:block; margin:4px 0; }
+  .api-box a { display:block; margin-bottom:10px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>🌅 일출·일몰 시간</h1>
+
+  <form id="form">
+    <input id="city" type="text" placeholder="지역 이름 (예: 서울, Busan, Tokyo)" value="서울" required>
+    <input id="date" type="date" aria-label="날짜">
+    <button type="submit">검색</button>
+  </form>
+
+  <section class="card" id="place-card" aria-live="polite">
+    <p class="muted">지역 이름을 입력해 주세요.</p>
+  </section>
+
+  <section class="card" id="sun-card" aria-live="polite">
+    <h2>☀️ 일출·일몰</h2>
+    <p class="muted">대기 중…</p>
+  </section>
+
+  <p class="muted">Sun data by <a href="https://sunrise-sunset.org/" target="_blank" rel="noopener">Sunrise-Sunset.org</a>
+    · 위치 검색 <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a>
+    · 번역 <a href="https://mymemory.translated.net/" target="_blank" rel="noopener">MyMemory</a>
+    · 시각은 해당 지역의 현지 시간이에요.</p>
+
+  <section class="card api-box">
+    <strong>🔌 이 화면이 쓰는 API</strong>
+    <div id="api-list" class="muted">검색하면 실제로 부른 주소가 여기에 나와요.</div>
+  </section>
+</main>
+
+<script>
+const API = {
+  geocode: "https://geocoding-api.open-meteo.com/v1/search", // 🔌 지역 이름 → 위도·경도·시간대 (?name=&count=1&language=ko)
+  translate: "https://api.mymemory.translated.net/get",      // 🔌 한글 등 → 영어 번역 (?q=&langpair=ko|en), 지오코딩이 못 찾을 때만 사용
+  sun: "https://api.sunrise-sunset.org/v2",                  // 🔌 일출·일몰 (?lat=&lng=&date=&tz=)
+};
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fail = (what, e) => `<p class="error">😢 ${what}을(를) 불러오지 못했어요.</p><p class="muted">잠시 뒤 다시 검색해 보세요. (${esc(e.message)})</p>`;
+
+async function getJson(url) {
+  const res = await fetch(url); // 🔌 API 호출
+  if (!res.ok) {
+    let msg = "HTTP " + res.status;
+    if (res.status === 429) msg += " · 요청이 너무 많아요";
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+function showApis(urls) {
+  $("api-list").innerHTML = urls.map(([name, u]) =>
+    `<div>${name}</div><code>${esc(u)}</code><a href="${esc(u)}" target="_blank" rel="noopener">새 탭에서 원본 JSON 보기</a>`).join("");
+}
+
+// 오늘 날짜(내 컴퓨터 기준)를 YYYY-MM-DD로
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+$("date").value = today();
+
+// ISO 시각 → 지정한 시간대의 HH:MM (없으면 "없음")
+function hm(iso, tz) {
+  if (!iso) return "없음";
+  return new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz }).format(new Date(iso));
+}
+function dayLen(sec) {
+  if (sec == null) return "—";
+  return `${Math.floor(sec / 3600)}시간 ${Math.round(sec % 3600 / 60)}분`;
+}
+
+function renderSun(d, tz) {
+  const status = {
+    midnight_sun: "🌞 백야: 해가 지지 않는 날이에요.",
+    polar_night: "🌑 극야: 해가 뜨지 않는 날이에요.",
+  }[d.sun_status];
+  $("sun-card").innerHTML = `<h2>☀️ ${esc(d.date)} 일출·일몰</h2>
+    <div class="pair">
+      <div><div class="label">🌅 일출</div><p class="time">${hm(d.sunrise, tz)}</p></div>
+      <div><div class="label">🌇 일몰</div><p class="time">${hm(d.sunset, tz)}</p></div>
+    </div>
+    ${status ? `<p>${status}</p>` : ""}
+    <div class="row"><span>낮의 길이</span><b>${dayLen(d.day_length)}</b></div>
+    <div class="row"><span>남중 시각(해가 가장 높을 때)</span><b>${hm(d.solar_noon, tz)}</b></div>
+    <p class="muted">기준 날짜: ${esc(d.date)} · 시간대: ${esc(tz)}</p>`;
+}
+
+async function search(name, date) {
+  const place = $("place-card");
+  const sun = $("sun-card");
+  place.innerHTML = `<p class="muted">‘${esc(name)}’ 위치를 찾는 중…</p>`;
+  const geoUrl = q => `${API.geocode}?name=${encodeURIComponent(q)}&count=1&language=ko`;
+  const used = [["① 지오코딩", geoUrl(name)]];
+  showApis(used);
+  let g, translated = null;
+  try {
+    let d = await getJson(geoUrl(name));
+    // 못 찾았고 영어(ASCII)가 아닌 글자가 있으면 영어로 번역해서 다시 찾는다
+    if (!d.results?.length && /[^\x00-\x7F]/.test(name)) {
+      const from = /[가-힣]/.test(name) ? "ko" : "Autodetect";
+      const trUrl = `${API.translate}?q=${encodeURIComponent(name)}&langpair=${from}|en`;
+      used.push(["② 영어로 번역", trUrl]);
+      showApis(used);
+      try {
+        const t = await getJson(trUrl);
+        const en = String(t.responseData?.translatedText ?? "").replace(/[.,!?\s]+$/, "").trim();
+        if (en && en.toLowerCase() !== name.toLowerCase() && !/[^\x00-\x7F]/.test(en)) {
+          translated = en;
+          used.push(["③ 지오코딩(영어)", geoUrl(en)]);
+          showApis(used);
+          d = await getJson(geoUrl(en));
+        }
+      } catch (e) { /* 번역이 실패하면 아래 '못 찾았어요' 안내로 간다 */ }
+    }
+    if (!d.results?.length) {
+      place.innerHTML = `<p class="error">‘${esc(name)}’ 지역을 찾지 못했어요.</p><p class="muted">${translated ? `영어로 ‘${esc(translated)}’(으)로 바꿔 찾아봤지만 결과가 없었어요. ` : ""}철자를 확인하거나 영어 이름으로 검색해 보세요.</p>`;
+      sun.innerHTML = `<h2>☀️ 일출·일몰</h2><p class="muted">—</p>`;
+      return;
+    }
+    g = d.results[0];
+  } catch (e) {
+    place.innerHTML = fail("지역 위치", e);
+    return;
+  }
+  const { latitude: lat, longitude: lng } = g;
+  const tz = g.timezone || "UTC";
+  place.innerHTML = `<h2>📍 ${esc(g.name)}${g.country ? ", " + esc(g.country) : ""}</h2>
+    <p class="muted">${g.admin1 ? esc(g.admin1) + " · " : ""}위도 ${lat}, 경도 ${lng}</p>
+    ${translated ? `<p class="muted">‘${esc(name)}’을(를) 영어 ‘${esc(translated)}’(으)로 바꿔 찾았어요.</p>` : ""}`;
+
+  const sunUrl = `${API.sun}?lat=${lat}&lng=${lng}&date=${encodeURIComponent(date)}&tz=${encodeURIComponent(tz)}`;
+  used.push([`${used.length + 1 === 2 ? "②" : "④"} 일출·일몰`, sunUrl]);
+  showApis(used);
+  sun.innerHTML = `<h2>☀️ 일출·일몰</h2><p class="muted">시간을 불러오는 중…</p>`;
+  try {
+    const d = await getJson(sunUrl);
+    if (d.error) throw new Error(d.message || d.error);
+    renderSun(d, tz);
+  } catch (e) { sun.innerHTML = `<h2>☀️ 일출·일몰</h2>` + fail("일출·일몰 시간", e); }
+}
+
+$("form").addEventListener("submit", e => {
+  e.preventDefault();
+  const name = $("city").value.trim();
+  if (name) search(name, $("date").value || today());
+});
+search($("city").value, $("date").value);
+</script>
+</body>
+</html>
